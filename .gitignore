@@ -1,0 +1,9 @@
+# Ignorar archivo de credenciales (SEGURIDAD CRÍTICA)
+credenciales.json
+
+# Ignorar archivos de sistema y carpetas temporales
+__pycache__/
+*.pyc
+.DS_Store
+.venv
+venv/
