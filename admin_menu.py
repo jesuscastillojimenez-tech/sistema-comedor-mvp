@@ -7,7 +7,7 @@ st.set_page_config(page_title="Editor de Menú", page_icon="📝")
 
 # 🔒 SEGURIDAD
 pwd = st.sidebar.text_input("🔑 Contraseña de Admin:", type="password")
-if pwd != "tacos2025": 
+if pwd != "Comedor2026": 
     st.warning("⚠️ Ingresa la contraseña para editar.")
     st.stop()
 
