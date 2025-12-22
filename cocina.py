@@ -5,11 +5,22 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 st.set_page_config(page_title="Monitor de Cocina", page_icon="👩‍🍳", layout="wide")
 
-# 🔒 SEGURIDAD
+# ==========================================
+# 🔒 BLOQUE DE SEGURIDAD (ACTUALIZADO)
+# ==========================================
 pwd = st.sidebar.text_input("🔑 Contraseña de Cocina:", type="password")
-if pwd != "Comedor2026": 
-    st.warning("⚠️ Ingresa la contraseña en la barra lateral.")
+
+# Verificamos si existe el secreto para evitar errores en local si no está configurado
+if "admin_password" in st.secrets:
+    clave_secreta = st.secrets["admin_password"]
+else:
+    # Fallback por si lo corres en local sin secrets.toml (opcional)
+    clave_secreta = "Comedor0902" 
+
+if pwd != clave_secreta: 
+    st.warning("⚠️ Ingresa la contraseña correcta en la barra lateral.")
     st.stop()
+# ==========================================
 
 st.title("👩‍🍳 Monitor de Producción y Empaque")
 

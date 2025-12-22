@@ -5,11 +5,20 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 st.set_page_config(page_title="Editor de Menú", page_icon="📝")
 
-# 🔒 SEGURIDAD
+# ==========================================
+# 🔒 BLOQUE DE SEGURIDAD (ACTUALIZADO)
+# ==========================================
 pwd = st.sidebar.text_input("🔑 Contraseña de Admin:", type="password")
-if pwd != "Comedor2026": 
+
+if "admin_password" in st.secrets:
+    clave_secreta = st.secrets["admin_password"]
+else:
+    clave_secreta = "Comedor0902"
+
+if pwd != clave_secreta: 
     st.warning("⚠️ Ingresa la contraseña para editar.")
     st.stop()
+# ==========================================
 
 st.title("📝 Editor de Menú y Precios")
 
