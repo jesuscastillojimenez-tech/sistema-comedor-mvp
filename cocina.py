@@ -3,119 +3,103 @@ import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-st.set_page_config(page_title="Monitor de Cocina", page_icon="👩‍🍳", layout="wide")
+st.set_page_config(page_title="Cocina", page_icon="👩‍🍳", layout="wide")
 
-# ==========================================
-# 🔒 BLOQUE DE SEGURIDAD (ACTUALIZADO)
-# ==========================================
-pwd = st.sidebar.text_input("🔑 Contraseña de Cocina:", type="password")
-
-# Verificamos si existe el secreto para evitar errores en local si no está configurado
-if "admin_password" in st.secrets:
-    clave_secreta = st.secrets["admin_password"]
-else:
-    # Fallback por si lo corres en local sin secrets.toml (opcional)
-    clave_secreta = "Comedor0902" 
-
-if pwd != clave_secreta: 
-    st.warning("⚠️ Ingresa la contraseña correcta en la barra lateral.")
+# --- SEGURIDAD ---
+if "admin_password" not in st.secrets:
+    st.error("❌ ERROR CRÍTICO")
     st.stop()
-# ==========================================
+if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin_password"]:
+    st.warning("Acceso restringido")
+    st.stop()
 
-st.title("👩‍🍳 Monitor de Producción y Empaque")
-
-# --- CONEXIÓN HÍBRIDA ---
-def conectar_google_sheets():
+# --- CONEXIÓN ---
+def conectar_wb():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    try:
-        # NUBE
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        # LOCAL
-        else:
-            creds = ServiceAccountCredentials.from_json_keyfile_name('credenciales.json', scope)
-            
-        client = gspread.authorize(creds)
-        sheet = client.open("Base_Datos_Comedor").sheet1 
-        return sheet
-    except Exception as e:
-        st.error(f"⚠️ Error de conexión: {e}")
-        return None
+    if "gcp_service_account" in st.secrets:
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+    else:
+        creds = ServiceAccountCredentials.from_json_keyfile_name('credenciales.json', scope)
+    return gspread.authorize(creds).open("Base_Datos_Comedor")
 
-# --- CARGA DATOS ---
-def cargar_datos():
-    sheet = conectar_google_sheets()
-    if not sheet: return pd.DataFrame()
-    
-    data = sheet.get_all_records()
-    df = pd.DataFrame(data)
-    
-    if df.empty: return pd.DataFrame()
+wb = conectar_wb()
 
-    cols = ['Estatus', 'Hora', 'Ubicacion', 'Tipo', 'Precio', 'Plato', 'Guarnicion', 'Notas', 'Cliente', 'Detalles', 'Extras']
-    for col in cols:
-        if col not in df.columns:
-            st.error(f"❌ Falta la columna '{col}' en Hoja1.")
-            return pd.DataFrame()
+# --- LEER CONFIG PARA TÍTULOS ---
+sh_config = wb.worksheet("Config")
+conf_data = sh_config.get_all_records()
+conf = {str(r['Clave']): str(r['Valor']) for r in conf_data}
+T1 = conf.get('titulo_pestana_1', 'Seccion 1')
+T2 = conf.get('titulo_pestana_2', 'Seccion 2')
 
-    df = df[df['Estatus'] == 'PENDIENTE']
-    return df
+st.title("👩‍🍳 Monitor de Cocina")
+modo = st.sidebar.radio("Modo:", ["🔥 Pendientes", "📦 Recuperar"])
 
-if st.button("🔄 Actualizar Pedidos"): st.rerun()
+if st.button("🔄 ACTUALIZAR"): st.rerun()
 
-df = cargar_datos()
+sh_ped = wb.worksheet("Pedidos")
+df = pd.DataFrame(sh_ped.get_all_records())
 
 if df.empty:
-    st.info("✅ No hay pedidos pendientes.")
+    st.info("Sin datos.")
     st.stop()
 
-# --- FILTROS ---
-horarios = sorted(df['Hora'].unique())
-horario_seleccionado = st.selectbox("🕒 Horario a Cocinar:", horarios)
-df_hora = df[df['Hora'] == horario_seleccionado]
-st.divider()
+# --- VISTA PENDIENTES ---
+if modo == "🔥 Pendientes":
+    df_pend = df[df['Estatus'] == 'PENDIENTE']
+    if df_pend.empty:
+        st.success("Todo despachado.")
+        st.stop()
 
-# --- VISTA POR EDIFICIO ---
-edificios = sorted(df_hora['Ubicacion'].unique())
+    horas = sorted(df_pend['Hora'].unique())
+    h_sel = st.selectbox("Horario:", horas)
+    df_h = df_pend[df_pend['Hora'] == h_sel]
+    sedes = df_h['Sede'].unique()
 
-for edificio in edificios:
-    df_edificio = df_hora[df_hora['Ubicacion'] == edificio]
-    
-    with st.expander(f"📍 {edificio} ({len(df_edificio)} pedidos)", expanded=True):
-        tab_cocina, tab_empaque = st.tabs(["🔥 COCINA", "📦 EMPAQUE"])
-        
-        with tab_cocina:
-            col_plancha, col_barra = st.columns(2)
+    st.divider()
+    for sede in sedes:
+        with st.expander(f"📍 {sede} ({len(df_h[df_h['Sede']==sede])})", expanded=True):
+            df_s = df_h[df_h['Sede'] == sede]
+            c1, c2, c3 = st.columns([2, 2, 1])
             
-            with col_plancha:
-                st.markdown("### 🔥 PLANCHA")
-                df_p = df_edificio[df_edificio['Tipo'] == 'PLANCHA']
-                if not df_p.empty:
-                    conteo = df_p.groupby(['Plato', 'Guarnicion']).size().reset_index(name='Cant')
-                    for _, row in conteo.iterrows():
-                        st.info(f"**{row['Cant']}x** {row['Plato']} \n\n Guarn: {row['Guarnicion']}")
-                        notas = df_p[(df_p['Plato']==row['Plato']) & (df_p['Guarnicion']==row['Guarnicion']) & (df_p['Notas']!='')]['Notas'].tolist()
-                        for n in notas: st.warning(f"⚠️ {n}")
-                else: st.write("---")
+            # COLUMNA 1 (Dinámica)
+            with c1:
+                st.markdown(f"### {T1}")
+                # Buscamos coincidencias exactas con el nombre configurado
+                df_1 = df_s[df_s['Seccion'] == T1]
+                if not df_1.empty:
+                    conteo = df_1.groupby(['Platillo', 'Detalles', 'Notas']).size().reset_index(name='c')
+                    for _, r in conteo.iterrows():
+                        st.info(f"**{r['c']}x** {r['Platillo']}\n\n📝 {r['Detalles']} {r['Notas']}")
+            
+            # COLUMNA 2 (Dinámica)
+            with c2:
+                st.markdown(f"### {T2}")
+                df_2 = df_s[df_s['Seccion'] == T2]
+                if not df_2.empty:
+                    conteo = df_2.groupby(['Platillo', 'Detalles', 'Notas']).size().reset_index(name='c')
+                    for _, r in conteo.iterrows():
+                        st.warning(f"**{r['c']}x** {r['Platillo']}\n\n📝 {r['Detalles']} {r['Notas']}")
 
-            with col_barra:
-                st.markdown("### 🥘 BARRA")
-                df_b = df_edificio[df_edificio['Tipo'] == 'BARRA']
-                if not df_b.empty:
-                    conteo = df_b.groupby(['Plato', 'Guarnicion']).size().reset_index(name='Cant')
-                    for _, row in conteo.iterrows():
-                        st.success(f"**{row['Cant']}x** {row['Plato']} \n\n Guarn: {row['Guarnicion']}")
-                        notas = df_b[(df_b['Plato']==row['Plato']) & (df_b['Guarnicion']==row['Guarnicion']) & (df_b['Notas']!='')]['Notas'].tolist()
-                        for n in notas: st.warning(f"⚠️ {n}")
-                else: st.write("---")
+            # ACCIONES
+            with c3:
+                st.markdown("### 🖨️")
+                txt = f"== {sede} {h_sel} ==\n"
+                for _, r in df_s.iterrows(): txt += f"{r['Cliente']}: {r['Platillo']} ({r['Detalles']})\n---\n"
+                st.text_area("Ticket", txt, height=100)
+                if st.button(f"🚀 DESPACHAR {sede}", key=sede):
+                    updates = [gspread.Cell(i+2, 12, 'ENVIADO') for i in df_s.index]
+                    sh_ped.update_cells(updates)
+                    st.success("Enviado")
+                    st.rerun()
 
-        with tab_empaque:
-            st.write("📋 **Copiar para etiquetas:**")
-            for _, row in df_edificio.iterrows():
-                linea = f"{row['Cliente']}: {row['Plato']}/{row['Guarnicion']}/{row['Detalles']}"
-                if row['Extras']: linea += f" [EXTRAS: {row['Extras']}]"
-                if row['Notas']: linea += f" (Nota: {row['Notas']})"
-                linea += f" [Total: ${row['Precio']}]"
-                st.text(linea)
+# --- VISTA RECUPERAR ---
+else:
+    st.header("Recuperar Despachados")
+    df_env = df[df['Estatus'] == 'ENVIADO']
+    if not df_env.empty:
+        sel = st.multiselect("Selecciona para regresar:", df_env.index, format_func=lambda x: f"{df_env.loc[x]['Cliente']} - {df_env.loc[x]['Platillo']}")
+        if st.button("↩️ REGRESAR A COCINA") and sel:
+            updates = [gspread.Cell(i+2, 12, 'PENDIENTE') for i in sel]
+            sh_ped.update_cells(updates)
+            st.success("Recuperado")
+            st.rerun()

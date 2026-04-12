@@ -7,257 +7,282 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
 import pytz
 
-# --- CONFIGURACIÓN VISUAL ---
-st.set_page_config(page_title="Menú El Comedor", page_icon="🍲", layout="centered")
+# --- CONFIGURACIÓN INICIAL ---
+st.set_page_config(page_title="Cargando...", page_icon="🍽️", layout="centered")
 
-# --- CONEXIÓN A GOOGLE SHEETS (HÍBRIDA + PARCHE) ---
-def conectar_google_sheets(nombre_hoja="Hoja1"):
+# --- ESTADOS DE SESIÓN ---
+if 'carrito' not in st.session_state: st.session_state.carrito = []
+if 'scroll_top' not in st.session_state: st.session_state.scroll_top = False
+
+# --- CALLBACKS DE INTERACCIÓN ---
+def limpiar_seleccion_1():
+    if st.session_state.radio_seccion_1 is not None:
+        st.session_state.radio_seccion_2 = None
+
+def limpiar_seleccion_2():
+    if st.session_state.radio_seccion_2 is not None:
+        st.session_state.radio_seccion_1 = None
+
+def agregar_y_limpiar(item):
+    st.session_state.carrito.append(item)
+    st.session_state.radio_seccion_1 = None
+    st.session_state.radio_seccion_2 = None
+    st.toast("✅ Agregado")
+
+def reiniciar_y_subir():
+    st.session_state.radio_seccion_1 = None
+    st.session_state.radio_seccion_2 = None
+    st.session_state.scroll_top = True
+
+if st.session_state.scroll_top:
+    components.html('<script>window.parent.document.querySelector(\'section.main\').scrollTo(0, 0);</script>', height=0)
+    st.session_state.scroll_top = False
+
+# --- CONEXIÓN ---
+def conectar_google_sheets(nombre_hoja):
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     try:
-        # INTENTO 1: NUBE (Streamlit Secrets)
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            # CORRECCIÓN DE LLAVE: Reemplaza los \n literales por saltos de línea reales
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        # INTENTO 2: LOCAL (Archivo JSON)
         else:
             creds = ServiceAccountCredentials.from_json_keyfile_name('credenciales.json', scope)
-            
         client = gspread.authorize(creds)
         wb = client.open("Base_Datos_Comedor")
-        if nombre_hoja == "Menu":
-            return wb.worksheet("Menu")
-        else:
-            return wb.sheet1
+        return wb.worksheet(nombre_hoja)
     except Exception as e:
-        st.error(f"⚠️ Error conectando con Google ({nombre_hoja}): {e}")
+        st.error(f"⚠️ Error conectando ({nombre_hoja}): {e}")
         return None
 
-# --- CARGA DEL MENÚ DINÁMICO ---
+# --- CARGA CONFIG SAAS (DINÁMICA) ---
+@st.cache_data(ttl=300)
+def cargar_config_saas():
+    # 1. Configuración
+    hoja_config = conectar_google_sheets("Config")
+    if not hoja_config: return {}, {}
+    data_config = hoja_config.get_all_records()
+    config = {str(row['Clave']): str(row['Valor']) for row in data_config}
+    
+    # Defaults de seguridad por si el Excel está vacío
+    defaults = {
+        "titulo_pestana_1": "Principal", "titulo_pestana_2": "Secundario",
+        "titulo_selector_1": "Opciones", "titulo_selector_2": "Extra",
+        "titulo_extras": "Adicionales", "estado_tienda": "ABIERTO"
+    }
+    for k, v in defaults.items():
+        if k not in config or not config[k]: config[k] = v
+
+    # 2. Sedes
+    hoja_sedes = conectar_google_sheets("Sedes")
+    data_sedes = hoja_sedes.get_all_records()
+    sedes = {}
+    for row in data_sedes:
+        opciones = [x.strip() for x in str(row['Horarios_Texto']).split(',')]
+        sedes[row['Sede']] = opciones
+        
+    return config, sedes
+
+CONFIG, SEDES_DICT = cargar_config_saas()
+
+# --- VALIDACIÓN APERTURA ---
+if CONFIG["estado_tienda"].upper() != "ABIERTO":
+    st.title("⛔ " + CONFIG.get("titulo_app", "App"))
+    st.error(CONFIG.get("mensaje_cierre", "Cerrado."))
+    st.stop()
+
+st.markdown(f"# 🍽️ {CONFIG.get('titulo_app', 'Menú Digital')}")
+
+# --- CARGA MENÚ DINÁMICO ---
 @st.cache_data(ttl=60)
-def cargar_menu_dinamico():
+def cargar_menu():
     hoja = conectar_google_sheets("Menu")
     if not hoja: return None
-    
     data = hoja.get_all_records()
     df = pd.DataFrame(data)
     
-    # Filtrar solo disponibles
-    if 'Disponible' in df.columns:
-        df = df[df['Disponible'].astype(str).str.upper() == 'TRUE']
-    
+    if 'Activo' in df.columns:
+        df = df[df['Activo'].astype(str).str.upper() == 'TRUE']
+        
+    # Estructura basada en CONFIG
     menu = {
-        "PLANCHA": {}, "BARRA": {}, "EXTRAS": {}, "GUARNICION": [],
-        "ENTRADA": [], "ACOMPANAMIENTO": [], "BEBIDA": [], "POSTRE": []
+        CONFIG['titulo_pestana_1']: {}, 
+        CONFIG['titulo_pestana_2']: {}, 
+        CONFIG['titulo_extras']: {}, 
+        CONFIG['titulo_selector_1']: [], 
+        CONFIG['titulo_selector_2']: [], 
+        "Notas": []
+    }
+    
+    # Normalización para búsqueda insensible a mayúsculas
+    titulos_map = {
+        CONFIG['titulo_pestana_1'].lower(): CONFIG['titulo_pestana_1'],
+        CONFIG['titulo_pestana_2'].lower(): CONFIG['titulo_pestana_2'],
+        CONFIG['titulo_extras'].lower(): CONFIG['titulo_extras'],
+        CONFIG['titulo_selector_1'].lower(): CONFIG['titulo_selector_1'],
+        CONFIG['titulo_selector_2'].lower(): CONFIG['titulo_selector_2']
     }
 
     for _, row in df.iterrows():
-        cat = row['Categoria']
-        platillo = row['Platillo']
-        precio = row['Precio']
-
-        if cat in ["PLANCHA", "BARRA", "EXTRAS"]:
-            menu[cat][platillo] = precio
-        elif cat in menu:
-            menu[cat].append(platillo)
-            
-    # Opciones por defecto
-    if "Sin Guarnición" not in menu["GUARNICION"]: menu["GUARNICION"].insert(0, "Sin Guarnición")
-    if "Ninguna" not in menu["ENTRADA"]: menu["ENTRADA"].insert(0, "Ninguna")
-    if "Ninguno" not in menu["ACOMPANAMIENTO"]: menu["ACOMPANAMIENTO"].insert(0, "Ninguno")
-            
+        seccion_excel = str(row['Seccion']).strip()
+        seccion_lower = seccion_excel.lower()
+        
+        # Mapeo exacto
+        destino = titulos_map.get(seccion_lower)
+        
+        if destino:
+            # Si es plato fuerte o extra con precio
+            if destino in [CONFIG['titulo_pestana_1'], CONFIG['titulo_pestana_2'], CONFIG['titulo_extras']]:
+                menu[destino][row['Platillo']] = row['Precio']
+            # Si es lista (guarnicion/entrada)
+            else:
+                menu[destino].append(row['Platillo'])
+    
+    # Defaults para listas vacías
+    if not menu[CONFIG['titulo_selector_1']]: menu[CONFIG['titulo_selector_1']] = ["Ninguno"]
+    if not menu[CONFIG['titulo_selector_2']]: menu[CONFIG['titulo_selector_2']] = ["Ninguno"]
+    
     return menu
 
-MENU_DATA = cargar_menu_dinamico()
+MENU_DATA = cargar_menu()
 
-# Respaldo si falla la carga
-if not MENU_DATA:
-    st.warning("⚠️ Usando menú de respaldo (Error de conexión)")
-    MENU_DATA = {
-        "PLANCHA": {"Milanesa (Respaldo)": 95}, "BARRA": {"Guisado (Respaldo)": 80}, "EXTRAS": {},
-        "GUARNICION": ["Arroz"], "ENTRADA": ["Sopa"], "ACOMPANAMIENTO": ["Tortillas"], "BEBIDA": [], "POSTRE": []
-    }
-
-def guardar_pedido_en_nube(sheet, carrito, cliente, ubicacion, tel, horario_entrega):
+# --- GUARDAR PEDIDO ---
+def guardar_pedido(carrito, cliente, tel, sede, horario):
+    hoja = conectar_google_sheets("Pedidos")
     zona_mx = pytz.timezone('America/Mexico_City')
     fecha_hoy = datetime.now(zona_mx).strftime("%Y-%m-%d")
-
-    columna_a = sheet.col_values(1) 
-    siguiente_fila = len(columna_a) + 1
-    filas_a_insertar = []
-    
+    nuevas_filas = []
     for item in carrito:
-        # SANITIZACIÓN: Agregamos "'" para evitar fórmulas de Excel maliciosas
         fila = [
-            fecha_hoy, horario_entrega, 
-            f"'{cliente}", f"'{ubicacion}", f"'{tel}",
-            item['Plato'], item['Guarn'], f"'{item['Detalles']}", f"'{item['Extras']}",
-            f"'{item['Notas']}", item['Precio'], item['Tipo'], "PENDIENTE"
+            fecha_hoy, horario, f"'{cliente}", f"'{tel}", sede,
+            item['Plato'], f"'{item['Detalles']}", f"'{item['Extras']}",
+            f"'{item['Notas']}", item['Precio'], item['Seccion'], "PENDIENTE"
         ]
-        filas_a_insertar.append(fila)
-    
-    fila_fin = siguiente_fila + len(filas_a_insertar) - 1
-    rango = f"A{siguiente_fila}:M{fila_fin}"
-    sheet.update(range_name=rango, values=filas_a_insertar)
+        nuevas_filas.append(fila)
+    hoja.append_rows(nuevas_filas)
 
-# --- SESIÓN ---
-if 'carrito' not in st.session_state: st.session_state.carrito = []
-if 'scroll_to_top' not in st.session_state: st.session_state.scroll_to_top = False
-
-# --- CALLBACKS ---
-def agregar_al_carrito_callback(item):
-    st.session_state.carrito.append(item)
-    st.session_state.tab_plancha = None
-    st.session_state.tab_barra = None
-    st.toast('✅ ¡Agregado!', icon='😋')
-
-def reiniciar_seleccion_callback():
-    st.session_state.tab_plancha = None
-    st.session_state.tab_barra = None
-    st.session_state.scroll_to_top = True
-
-def borrar_todo_callback():
-    st.session_state.carrito = []
-    st.session_state.tab_plancha = None
-    st.session_state.tab_barra = None
-    st.session_state.scroll_to_top = True
-
-def al_seleccionar_plancha(): st.session_state.tab_barra = None
-def al_seleccionar_barra(): st.session_state.tab_plancha = None
-
-# --- SCROLL HACK ---
-if st.session_state.scroll_to_top:
-    components.html('<script>var body = window.parent.document.querySelector(\'[data-testid="stAppViewContainer"]\'); body.scrollTop = 0;</script>', height=0)
-    st.session_state.scroll_to_top = False
-
-# --- UI PRINCIPAL ---
-st.title("🍲 Cocina Económica 'El Comedor'")
-st.markdown("**¡Hola!** Arma tu pedido aquí y recíbelo en tu oficina.")
+# --- UI ---
+st.markdown("**¡Hola!** Arma tu pedido aquí.")
 st.divider()
 
-# 1. DATOS DE ENTREGA
 hay_pedidos = len(st.session_state.carrito) > 0
-with st.expander("📍 DATOS DE ENTREGA", expanded=not hay_pedidos):
-    if hay_pedidos: st.info("🔒 Datos bloqueados. Usa 'Borrar Todo' para corregir.")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        ubicacion_select = st.selectbox("¿Edificio?", ["Selecciona...", "Economía", "ProMéxico", "Corum", "Tribunal", "Audi", "Otro"], disabled=hay_pedidos)
-        ubicacion_final = ubicacion_select
-        if ubicacion_select == "Otro":
-            ubicacion_final = st.text_input("Escribe el nombre del lugar:", disabled=hay_pedidos) or ""
-    with col2:
-        horario = st.selectbox("¿A qué hora?", ["1:00 PM", "2:00 PM", "3:00 PM", "Lo antes posible"], disabled=hay_pedidos)
-    
+with st.expander("📍 1. DATOS DE ENTREGA", expanded=not hay_pedidos):
+    if hay_pedidos: st.info("🔒 Bloqueado. Borra el pedido para cambiar.")
     c1, c2 = st.columns(2)
-    with c1: cliente_nombre = st.text_input("Tu Nombre:", disabled=hay_pedidos)
-    with c2: 
-        # VALIDACIÓN DE TELÉFONO
-        cliente_tel = st.text_input("WhatsApp (10 dígitos):", disabled=hay_pedidos, max_chars=10)
-        if cliente_tel and (not cliente_tel.isdigit() or len(cliente_tel) < 10):
-            st.warning("⚠️ Ingresa un número válido de 10 dígitos.")
-            cliente_tel = ""
+    with c1:
+        lista_sedes = ["Selecciona..."] + list(SEDES_DICT.keys())
+        sede_select = st.selectbox("¿Sede?", lista_sedes, disabled=hay_pedidos)
+    with c2:
+        opciones_horario = ["Selecciona sede"]
+        if sede_select != "Selecciona..." and sede_select in SEDES_DICT:
+            opciones_horario = SEDES_DICT[sede_select]
+        horario_select = st.selectbox("¿Horario?", opciones_horario, disabled=hay_pedidos)
+    c3, c4 = st.columns(2)
+    with c3: nombre = st.text_input("Nombre:", disabled=hay_pedidos)
+    with c4: tel = st.text_input("WhatsApp:", max_chars=10, disabled=hay_pedidos)
 
-datos_completos = (ubicacion_select != "Selecciona..." and ubicacion_final != "" and cliente_nombre and cliente_tel)
+datos_validos = (sede_select != "Selecciona..." and nombre and len(tel)==10)
 
-# 2. SELECCIÓN DE PLATILLO
 st.divider()
-st.subheader("🍽️ Selecciona un Platillo")
-tab1, tab2 = st.tabs(["🔥 De la Plancha", "🥘 Guisados / Barra"])
+st.subheader("🍽️ 2. Selecciona")
 
-plato_elegido = ""
+if not MENU_DATA:
+    st.error("Error de conexión. Recarga.")
+    st.stop()
+
+# PESTAÑAS DINÁMICAS
+t1_name = CONFIG['titulo_pestana_1']
+t2_name = CONFIG['titulo_pestana_2']
+tab1, tab2 = st.tabs([f"🔥 {t1_name}", f"🥘 {t2_name}"])
+
+plato_sel = ""
 precio_base = 0
-tipo_cocina = ""
+seccion_sel = ""
 
 with tab1:
-    opciones = [f"{k} (${v})" for k, v in MENU_DATA["PLANCHA"].items()]
-    sel = st.radio("Opciones Plancha:", opciones, index=None, key="tab_plancha", on_change=al_seleccionar_plancha)
-    if sel:
-        plato_elegido = sel.split(" ($")[0]
-        precio_base = MENU_DATA["PLANCHA"][plato_elegido]
-        tipo_cocina = "PLANCHA"
+    opcs = [f"{k} (${v})" for k,v in MENU_DATA[t1_name].items()]
+    sel_1 = st.radio(f"Opciones {t1_name}", opcs, index=None, key="radio_seccion_1", on_change=limpiar_seleccion_2)
+    if sel_1:
+        plato_sel = sel_1.split(" ($")[0]
+        precio_base = MENU_DATA[t1_name][plato_sel]
+        seccion_sel = t1_name
 
 with tab2:
-    opciones = [f"{k} (${v})" for k, v in MENU_DATA["BARRA"].items()]
-    sel = st.radio("Opciones Barra:", opciones, index=None, key="tab_barra", on_change=al_seleccionar_barra)
-    if sel:
-        plato_elegido = sel.split(" ($")[0]
-        precio_base = MENU_DATA["BARRA"][plato_elegido]
-        tipo_cocina = "BARRA"
+    opcs_2 = [f"{k} (${v})" for k,v in MENU_DATA[t2_name].items()]
+    sel_2 = st.radio(f"Opciones {t2_name}", opcs_2, index=None, key="radio_seccion_2", on_change=limpiar_seleccion_1)
+    if sel_2:
+        plato_sel = sel_2.split(" ($")[0]
+        precio_base = MENU_DATA[t2_name][plato_sel]
+        seccion_sel = t2_name
 
-# 3. PERSONALIZACIÓN
-nuevo_item = None
-if plato_elegido:
-    st.success(f"Personalizando: **{plato_elegido}**")
-
-    c_guarn, c_ent = st.columns(2)
-    with c_guarn: guarn = st.selectbox("Guarnición:", MENU_DATA["GUARNICION"])
-    with c_ent: ent = st.radio("Entrada:", MENU_DATA["ENTRADA"], horizontal=True)
-
-    c_p1, c_p2, c_p3 = st.columns(3)
-    with c_p1: acomp = st.radio("Acompañamiento:", MENU_DATA["ACOMPANAMIENTO"])
-    with c_p2: 
-        nom_beb = MENU_DATA["BEBIDA"][0] if MENU_DATA["BEBIDA"] else "Agua"
-        agua = st.checkbox(nom_beb, True) if MENU_DATA["BEBIDA"] else False
-    with c_p3: 
-        nom_postre = MENU_DATA["POSTRE"][0] if MENU_DATA["POSTRE"] else "Postre"
-        postre = st.checkbox(nom_postre, True) if MENU_DATA["POSTRE"] else False
-
-    lista_extras = [f"{k} (+${v})" for k, v in MENU_DATA["EXTRAS"].items()]
-    extras_sel = st.multiselect("Extras ($):", lista_extras)
-    notas = st.text_input("Instrucciones especiales:", placeholder="Ej. Sin cebolla")
-
-    costo_extras = sum([MENU_DATA["EXTRAS"][e.split(" (+$")[0]] for e in extras_sel])
-    precio_final = precio_base + costo_extras
-
-    detalles_texto = f"{ent}, {acomp}"
-    if agua: detalles_texto += f", {nom_beb}"
-    if postre: detalles_texto += f", {nom_postre}"
-    extras_texto = ", ".join([e.split(" (+$")[0] for e in extras_sel])
-
-    nuevo_item = {
-        "Plato": plato_elegido, "Guarn": guarn, "Detalles": detalles_texto,
-        "Extras": extras_texto, "Notas": notas, "Precio": precio_final, "Tipo": tipo_cocina
-    }
-
-    st.markdown(f"**Precio: :green[${precio_final}]**")
-    st.button("⬇️ AGREGAR A MI ORDEN", use_container_width=True, type="primary", on_click=agregar_al_carrito_callback, args=(nuevo_item,))
-
-# 4. RESUMEN Y FINALIZAR
-if len(st.session_state.carrito) > 0:
-    st.divider()
-    st.subheader(f"🛒 Tu Orden ({len(st.session_state.carrito)} platillos)")
-    df = pd.DataFrame(st.session_state.carrito)
-    st.caption(f"📍 Entregar en: **{ubicacion_final}** a las {horario}")
-    st.dataframe(df[["Tipo", "Plato", "Guarn", "Detalles", "Extras", "Notas", "Precio"]], use_container_width=True, hide_index=True)
+# PERSONALIZACIÓN DINÁMICA
+if plato_sel:
+    st.success(f"Seleccionaste: **{plato_sel}**")
     
-    total = df["Precio"].sum()
-    st.markdown(f"<h3 style='text-align: right;'>TOTAL: ${total}</h3>", unsafe_allow_html=True)
+    # Selectores dinámicos
+    col_sel_1, col_sel_2 = st.columns(2)
     
-    col_izq, col_der = st.columns(2)
-    with col_izq: st.button("➕ AGREGAR OTRO", on_click=reiniciar_seleccion_callback, use_container_width=True)
-    with col_der:
-        if datos_completos:
-            if st.button("✅ ENVIAR PEDIDO", type="primary", use_container_width=True):
-                with st.spinner('Enviando pedido...'):
-                    hoja = conectar_google_sheets()
-                    if hoja:
-                        guardar_pedido_en_nube(hoja, st.session_state.carrito, cliente_nombre, ubicacion_final, cliente_tel, horario)
-                        st.success("¡Pedido registrado!")
-                        resumen_texto = f"*PEDIDO ({horario})*\n👤 {cliente_nombre}\n📍 {ubicacion_final}\n\n"
-                        for item in st.session_state.carrito:
-                            resumen_texto += f"🔹 {item['Plato']} ({item['Guarn']})\n 🥣 {item['Detalles']}\n"
-                            if item['Extras']: resumen_texto += f" ➕ Extras: {item['Extras']}\n"
-                            if item['Notas']: resumen_texto += f" ⚠️ Nota: {item['Notas']}\n"
-                            resumen_texto += "----------------\n"
-                        resumen_texto += f"\n💰 *TOTAL: ${total}*"
-                        link_whatsapp = f"https://wa.me/527299679866?text={urllib.parse.quote(resumen_texto)}"
-                        st.markdown(f"### 👉 [CONFIRMAR EN WHATSAPP]({link_whatsapp})")
-                    else: st.error("Error de conexión.")
-        else:
-             if ubicacion_select == "Otro" and not ubicacion_final: st.warning("Escribe el lugar.")
-             else: st.warning("Faltan datos de entrega.")
+    titulo_s1 = CONFIG['titulo_selector_1']
+    lista_s1 = MENU_DATA.get(titulo_s1, ["Ninguno"])
+    with col_sel_1: 
+        sel_val_1 = st.selectbox(f"{titulo_s1}:", lista_s1)
+        
+    titulo_s2 = CONFIG['titulo_selector_2']
+    lista_s2 = MENU_DATA.get(titulo_s2, [])
+    sel_val_2 = None
+    if lista_s2: # Solo mostramos si hay opciones
+        with col_sel_2: 
+            sel_val_2 = st.selectbox(f"{titulo_s2}:", lista_s2)
+    
+    # Extras Dinámicos
+    titulo_ext = CONFIG['titulo_extras']
+    extras_dict = MENU_DATA.get(titulo_ext, {})
+    extras_nombres = [f"{k} (+${v})" for k,v in extras_dict.items()]
+    extras_sel = st.multiselect(f"{titulo_ext}:", extras_nombres)
+    
+    notas = st.text_input("Notas (Sin cebolla, etc):")
+    
+    # Cálculos
+    costo_extras = sum([extras_dict[e.split(" (+$")[0]] for e in extras_sel])
+    precio_total = precio_base + costo_extras
+    
+    detalles = f"{titulo_s1}: {sel_val_1}"
+    if sel_val_2: detalles += f", {titulo_s2}: {sel_val_2}"
+    extras_txt = ", ".join([e.split(" (+$")[0] for e in extras_sel])
+    
+    st.markdown(f"### Total: :green[${precio_total}]")
+    
+    st.button("⬇️ AGREGAR A LA ORDEN", type="primary", use_container_width=True, 
+              on_click=agregar_y_limpiar, 
+              args=({"Plato": plato_sel, "Precio": precio_total, "Seccion": seccion_sel, 
+                     "Detalles": detalles, "Extras": extras_txt, "Notas": notas},))
+
+if st.session_state.carrito:
     st.divider()
-    st.button("🗑️ BORRAR TODO", type="secondary", use_container_width=True, on_click=borrar_todo_callback)
-elif len(st.session_state.carrito) == 0: st.info("👆 Selecciona tu platillo arriba.")
+    st.subheader(f"🛒 Pedido ({len(st.session_state.carrito)})")
+    df_c = pd.DataFrame(st.session_state.carrito)
+    st.dataframe(df_c[["Plato", "Detalles", "Precio"]], hide_index=True, use_container_width=True)
+    
+    total = df_c["Precio"].sum()
+    st.markdown(f"### TOTAL: :green[${total}]")
+    
+    c_a, c_b = st.columns(2)
+    with c_a: st.button("➕ AGREGAR OTRO", use_container_width=True, on_click=reiniciar_y_subir)
+    with c_b:
+        if datos_validos:
+            if st.button("✅ FINALIZAR", type="primary", use_container_width=True):
+                with st.spinner("Enviando..."):
+                    guardar_pedido(st.session_state.carrito, nombre, tel, sede_select, horario_select)
+                    msg = f"Hola {nombre}. Pedido {sede_select} ({horario_select}):\n"
+                    for i in st.session_state.carrito:
+                        msg += f"- {i['Plato']} ({i['Detalles']})\n"
+                    msg += f"Total: ${total}\nDatos: {CONFIG.get('datos_banco','')}"
+                    link = f"https://wa.me/{CONFIG.get('telefono_wa','')}?text={urllib.parse.quote(msg)}"
+                    st.success("¡Listo!")
+                    st.link_button("📲 Confirmar por WhatsApp", link, type="secondary", use_container_width=True)
+                    st.session_state.carrito = []
+        else: st.warning("Faltan datos arriba.")
+    
+    if st.button("🗑️ Borrar Todo"): 
+        st.session_state.carrito = []
+        st.rerun()
