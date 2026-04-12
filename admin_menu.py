@@ -9,6 +9,8 @@ st.set_page_config(page_title="Admin", page_icon="🔑", layout="wide")
 if "admin_password" not in st.secrets:
     st.error("❌ FALTA PASSWORD EN SECRETS")
     st.stop()
+
+# Verificación de password en barra lateral
 if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin_password"]:
     st.warning("Acceso denegado")
     st.stop()
@@ -17,8 +19,12 @@ if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin
 def conectar():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     if "gcp_service_account" in st.secrets:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+        # Ajuste para leer correctamente la llave en la nube
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
+        # Uso local
         creds = ServiceAccountCredentials.from_json_keyfile_name('credenciales.json', scope)
     return gspread.authorize(creds).open("Base_Datos_Comedor")
 
@@ -44,14 +50,14 @@ with tab_menu:
     sh_menu = wb.worksheet("Menu")
     df_menu = pd.DataFrame(sh_menu.get_all_records())
 
-    # DIVIDIMOS LOS DATOS (Para evitar errores visuales)
+    # DIVIDIMOS LOS DATOS
     secciones_fuertes = [T1, T2]
     secciones_complementos = [S1, S2, EXT, "Notas", "Bebida", "Postre"]
 
     df_main = df_menu[df_menu['Seccion'].isin(secciones_fuertes)]
-    df_comp = df_menu[~df_menu['Seccion'].isin(secciones_fuertes)] # El resto
+    df_comp = df_menu[~df_menu['Seccion'].isin(secciones_fuertes)]
 
-    st.info(f"Edita por separado para mayor seguridad. Recuerda: Usa los nombres exactos: '{T1}', '{T2}', '{S1}', etc.")
+    st.info(f"Edita por separado. Secciones: '{T1}', '{T2}', '{S1}', etc.")
 
     c1, c2 = st.columns(2)
     
@@ -66,11 +72,10 @@ with tab_menu:
                                    column_config={"Seccion": st.column_config.SelectboxColumn("Sección", options=secciones_complementos, required=True)})
 
     if st.button("💾 GUARDAR TODO EL MENÚ", type="primary"):
-        # UNIR Y GUARDAR
         df_final = pd.concat([edit_main, edit_comp], ignore_index=True)
         sh_menu.clear()
         sh_menu.update([df_final.columns.values.tolist()] + df_final.values.tolist())
-        st.success("¡Menú guardado y unificado correctamente!")
+        st.success("¡Menú guardado correctamente!")
 
 with tab_conf:
     st.header("Configuración Universal")

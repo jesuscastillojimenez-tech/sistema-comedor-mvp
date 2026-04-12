@@ -7,8 +7,9 @@ st.set_page_config(page_title="Cocina", page_icon="👩‍🍳", layout="wide")
 
 # --- SEGURIDAD ---
 if "admin_password" not in st.secrets:
-    st.error("❌ ERROR CRÍTICO")
+    st.error("❌ ERROR: FALTA PASSWORD EN SECRETS")
     st.stop()
+
 if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin_password"]:
     st.warning("Acceso restringido")
     st.stop()
@@ -17,8 +18,12 @@ if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin
 def conectar_wb():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     if "gcp_service_account" in st.secrets:
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets["gcp_service_account"]), scope)
+        # Ajuste para leer correctamente la llave en la nube
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
+        # Uso local
         creds = ServiceAccountCredentials.from_json_keyfile_name('credenciales.json', scope)
     return gspread.authorize(creds).open("Base_Datos_Comedor")
 
@@ -61,17 +66,14 @@ if modo == "🔥 Pendientes":
             df_s = df_h[df_h['Sede'] == sede]
             c1, c2, c3 = st.columns([2, 2, 1])
             
-            # COLUMNA 1 (Dinámica)
             with c1:
                 st.markdown(f"### {T1}")
-                # Buscamos coincidencias exactas con el nombre configurado
                 df_1 = df_s[df_s['Seccion'] == T1]
                 if not df_1.empty:
                     conteo = df_1.groupby(['Platillo', 'Detalles', 'Notas']).size().reset_index(name='c')
                     for _, r in conteo.iterrows():
                         st.info(f"**{r['c']}x** {r['Platillo']}\n\n📝 {r['Detalles']} {r['Notas']}")
             
-            # COLUMNA 2 (Dinámica)
             with c2:
                 st.markdown(f"### {T2}")
                 df_2 = df_s[df_s['Seccion'] == T2]
@@ -80,13 +82,13 @@ if modo == "🔥 Pendientes":
                     for _, r in conteo.iterrows():
                         st.warning(f"**{r['c']}x** {r['Platillo']}\n\n📝 {r['Detalles']} {r['Notas']}")
 
-            # ACCIONES
             with c3:
                 st.markdown("### 🖨️")
                 txt = f"== {sede} {h_sel} ==\n"
                 for _, r in df_s.iterrows(): txt += f"{r['Cliente']}: {r['Platillo']} ({r['Detalles']})\n---\n"
                 st.text_area("Ticket", txt, height=100)
                 if st.button(f"🚀 DESPACHAR {sede}", key=sede):
+                    # Actualizar estatus a ENVIADO (Columna L / 12)
                     updates = [gspread.Cell(i+2, 12, 'ENVIADO') for i in df_s.index]
                     sh_ped.update_cells(updates)
                     st.success("Enviado")
@@ -97,7 +99,8 @@ else:
     st.header("Recuperar Despachados")
     df_env = df[df['Estatus'] == 'ENVIADO']
     if not df_env.empty:
-        sel = st.multiselect("Selecciona para regresar:", df_env.index, format_func=lambda x: f"{df_env.loc[x]['Cliente']} - {df_env.loc[x]['Platillo']}")
+        sel = st.multiselect("Selecciona para regresar:", df_env.index, 
+                             format_func=lambda x: f"{df_env.loc[x]['Cliente']} - {df_env.loc[x]['Platillo']}")
         if st.button("↩️ REGRESAR A COCINA") and sel:
             updates = [gspread.Cell(i+2, 12, 'PENDIENTE') for i in sel]
             sh_ped.update_cells(updates)
