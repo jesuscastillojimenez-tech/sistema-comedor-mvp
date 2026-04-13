@@ -10,7 +10,6 @@ if "admin_password" not in st.secrets:
     st.error("❌ FALTA PASSWORD EN SECRETS")
     st.stop()
 
-# Verificación de password en barra lateral
 if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin_password"]:
     st.warning("Acceso denegado")
     st.stop()
@@ -19,19 +18,17 @@ if st.sidebar.text_input("🔑 Password:", type="password") != st.secrets["admin
 def conectar():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     if "gcp_service_account" in st.secrets:
-        # Ajuste para leer correctamente la llave en la nube
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     else:
-        # Uso local
         creds = ServiceAccountCredentials.from_json_keyfile_name('credenciales.json', scope)
     return gspread.authorize(creds).open("Base_Datos_Comedor")
 
 wb = conectar()
 st.title("⚙️ Panel de Control")
 
-# --- CARGAR CONFIGURACIÓN PARA TÍTULOS DINÁMICOS ---
+# --- CARGAR CONFIGURACIÓN ---
 sh_config = wb.worksheet("Config")
 df_config = pd.DataFrame(sh_config.get_all_records())
 config_dict = {str(r['Clave']): str(r['Valor']) for _, r in df_config.iterrows()}
@@ -42,30 +39,23 @@ S1 = config_dict.get('titulo_selector_1', 'Opcional 1')
 S2 = config_dict.get('titulo_selector_2', 'Opcional 2')
 EXT = config_dict.get('titulo_extras', 'Extras')
 
-# --- PESTAÑAS PRINCIPALES ---
-tab_menu, tab_conf, tab_sedes, tab_cierre = st.tabs(["🍔 Menú", "⚙️ Config", "📍 Sedes", "📂 Cierre"])
+# --- PESTAÑAS PRINCIPALES (Añadida pestaña de Reporte) ---
+tab_menu, tab_conf, tab_sedes, tab_cierre, tab_reporte = st.tabs(["🍔 Menú", "⚙️ Config", "📍 Sedes", "📂 Cierre", "📊 Reporte"])
 
 with tab_menu:
     st.header("Editor de Menú Seguro")
     sh_menu = wb.worksheet("Menu")
     df_menu = pd.DataFrame(sh_menu.get_all_records())
-
-    # DIVIDIMOS LOS DATOS
     secciones_fuertes = [T1, T2]
     secciones_complementos = [S1, S2, EXT, "Notas", "Bebida", "Postre"]
-
     df_main = df_menu[df_menu['Seccion'].isin(secciones_fuertes)]
     df_comp = df_menu[~df_menu['Seccion'].isin(secciones_fuertes)]
-
-    st.info(f"Edita por separado. Secciones: '{T1}', '{T2}', '{S1}', etc.")
-
-    c1, c2 = st.columns(2)
     
+    c1, c2 = st.columns(2)
     with c1:
         st.subheader("1. Platos Fuertes")
         edit_main = st.data_editor(df_main, num_rows="dynamic", key="editor_main", use_container_width=True,
                                    column_config={"Seccion": st.column_config.SelectboxColumn("Sección", options=secciones_fuertes, required=True)})
-    
     with c2:
         st.subheader("2. Complementos / Extras")
         edit_comp = st.data_editor(df_comp, num_rows="dynamic", key="editor_comp", use_container_width=True,
@@ -75,7 +65,7 @@ with tab_menu:
         df_final = pd.concat([edit_main, edit_comp], ignore_index=True)
         sh_menu.clear()
         sh_menu.update([df_final.columns.values.tolist()] + df_final.values.tolist())
-        st.success("¡Menú guardado correctamente!")
+        st.success("¡Menú guardado!")
 
 with tab_conf:
     st.header("Configuración Universal")
@@ -105,3 +95,9 @@ with tab_cierre:
             sh_ped.batch_clear([f"A2:L{len(pedidos)+1}"])
             st.success("Bandeja limpia.")
         else: st.info("Nada que archivar.")
+
+# --- NUEVA SECCIÓN: REPORTE DE LOOKER STUDIO ---
+with tab_reporte:
+    st.header("📈 Análisis de Ventas")
+    url_looker = "https://lookerstudio.google.com/embed/reporting/0d692966-4fa1-402d-af72-06bb44c4ce6b/page/5kwuF"
+    st.components.v1.iframe(url_looker, height=800, scrolling=True)
